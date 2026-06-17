@@ -2,11 +2,12 @@
 import { RENTAL_CONFIG } from './config.js';
 import { getUnavailableDates } from './calendar.js';
 import { db } from './firebase-init.js';
-import { collection, addDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+// PERUBAHAN: Mengganti addDoc menjadi setDoc dan doc
+import { collection, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 document.addEventListener("DOMContentLoaded", async () => {
   const inputTanggal = document.getElementById("tanggal-sewa");
-  const inputJam = document.getElementById("jam-ambil"); // BARU
+  const inputJam = document.getElementById("jam-ambil");
   const checkboxRules = document.getElementById("setuju-rules");
   const btnOrder = document.getElementById("btn-order");
   const elTotalHari = document.getElementById("total-hari");
@@ -21,6 +22,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const hargaPerHari = parseInt(inputTanggal.dataset.price);
 
   let tanggalTerpilih = [];
+  let isSubmitting = false; // PERUBAHAN: Tambahkan state untuk mencegah klik ganda
 
   const availabilityRef = collection(db, "cameras", cameraId, "availability");
   onSnapshot(availabilityRef, (querySnapshot) => {
@@ -75,16 +77,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("total-dp").innerText = `Rp ${(totalHarga*0.5).toLocaleString('id-ID')} (DP 50%)`;
   }
 
-  // Validasi mewajibkan inputJam
   function validasiForm() {
+    if (isSubmitting) return; // Cegah validasi mengubah warna jika sedang proses
+
     if (tanggalTerpilih.length === 2 && inputJam.value !== "" && checkboxRules.checked) {
       btnOrder.disabled = false;
-      btnOrder.className = "w-full py-4 bg-pink-500 hover:bg-pink-600 text-white font-bold rounded-2xl shadow-md text-center text-sm transition";
+      btnOrder.className = "w-full py-4 bg-pink-500 hover:bg-pink-600 text-white font-bold rounded-2xl shadow-md text-center text-sm transition uppercase";
       btnOrder.innerText = "Kirim Bukti TF (via WA)";
     } else {
       btnOrder.disabled = true;
-      btnOrder.className = "w-full py-4 bg-gray-400 text-white font-bold rounded-2xl text-center text-sm cursor-not-allowed";
-      btnOrder.innerText = "Lengkapi Form & Setujui Aturan";
+      btnOrder.className = "w-full py-4 bg-gray-400 text-white font-bold rounded-2xl shadow-md text-center text-sm cursor-not-allowed transition uppercase";
+      btnOrder.innerText = "Pilih Tanggal, Jam & Setujui";
     }
   }
 
@@ -92,33 +95,67 @@ document.addEventListener("DOMContentLoaded", async () => {
   checkboxRules.addEventListener("change", validasiForm);
 
   btnOrder.addEventListener("click", async () => {
-    if (tanggalTerpilih.length !== 2 || inputJam.value === "") return;
+    if (tanggalTerpilih.length !== 2 || inputJam.value === "" || isSubmitting) return;
+
+    // PERUBAHAN: Kunci UI Seketika
+    isSubmitting = true;
+    btnOrder.disabled = true;
+    btnOrder.className = "w-full py-4 bg-pink-300 text-white font-bold rounded-2xl shadow-md text-center text-sm cursor-wait transition uppercase";
+    btnOrder.innerText = "Memproses Pesanan...";
 
     const tglMulai = tanggalTerpilih[0].toLocaleDateString('id-ID', { day:'numeric', month:'short' });
     const tglSelesai = tanggalTerpilih[1] ? tanggalTerpilih[1].toLocaleDateString('id-ID', { day:'numeric', month:'short' }) : tglMulai;
     const diffDays = Math.ceil(Math.abs(tanggalTerpilih[1] - tanggalTerpilih[0]) / (1000 * 60 * 60 * 24)) + 1;
     const totalHarga = diffDays * hargaPerHari;
 
+    // PERUBAHAN: Membuat ID Transaksi Idempotent (Anti-Ganda)
+    // Format: idKamera_YYYYMMDD_JamAmbil_MenitPesan
+    const now = new Date();
+    const cleanDate = tanggalTerpilih[0].toISOString().split('T')[0].replace(/-/g, '');
+    const cleanTime = inputJam.value.replace(':', '');
+    const currentMinute = now.getMinutes().toString().padStart(2, '0');
+    
+    // Gabungan string ini memastikan klik di menit yang sama untuk pesanan yang sama akan menghasilkan ID yang sama
+    const uniqueTxId = `${cameraId}_${cleanDate}_${cleanTime}_m${currentMinute}`;
+    
+    const docRef = doc(db, "transactions", uniqueTxId);
+
     try {
-      await addDoc(collection(db, "transactions"), {
+      // Menggunakan setDoc alih-alih addDoc
+      await setDoc(docRef, {
         cameraName: cameraName,
         duration: `${diffDays} Hari`,
         dateRange: inputTanggal.value, 
-        timeAmbil: inputJam.value, // SIMPAN JAM KE DATABASE
+        timeAmbil: inputJam.value,
         totalPrice: totalHarga,
         status: "pending", 
-        createdAt: new Date().toLocaleDateString('id-ID', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'})
+        createdAt: now.toLocaleDateString('id-ID', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'})
       });
-    } catch(err) { console.error(err); }
 
-    const teksPesan = `Halo Admin Rentmylens.id, ini detail pesanan & bukti TF DP 50% saya:\n\n` +
-                      `• Kamera: ${cameraName}\n` +
-                      `• Tanggal: ${tglMulai} s/d ${tglSelesai} (${diffDays} Hari)\n` +
-                      `• *Jam Ambil/Kembali: ${inputJam.value} WIB*\n` +
-                      `• Sisa Pelunasan di Basecamp: Rp ${(totalHarga*0.5).toLocaleString('id-ID')}\n\n` +
-                      `(Saya lampirkan gambar bukti transfer DP 50% di bawah)`;
+      const teksPesan = `Halo Admin Rentmylens.id, ini detail pesanan & bukti TF DP 50% saya:\n\n` +
+                        `• Kamera: ${cameraName}\n` +
+                        `• Tanggal: ${tglMulai} s/d ${tglSelesai} (${diffDays} Hari)\n` +
+                        `• *Jam Ambil/Kembali: ${inputJam.value} WIB*\n` +
+                        `• Sisa Pelunasan di Basecamp: Rp ${(totalHarga*0.5).toLocaleString('id-ID')}\n\n` +
+                        `(Saya lampirkan gambar bukti transfer DP 50% di bawah)`;
 
-    const urlWA = `https://api.whatsapp.com/send?phone=${RENTAL_CONFIG.adminWhatsAppNumber}&text=${encodeURIComponent(teksPesan)}`;
-    window.open(urlWA, '_blank');
+      const urlWA = `https://api.whatsapp.com/send?phone=${RENTAL_CONFIG.adminWhatsAppNumber}&text=${encodeURIComponent(teksPesan)}`;
+      window.open(urlWA, '_blank');
+
+      // Opsional: Reset form setelah sukses
+      setTimeout(() => {
+        isSubmitting = false;
+        picker.clear();
+        inputJam.value = "";
+        checkboxRules.checked = false;
+        validasiForm();
+      }, 2000);
+
+    } catch(err) { 
+      console.error(err); 
+      alert("Terjadi kesalahan sistem, silakan coba lagi.");
+      isSubmitting = false;
+      validasiForm();
+    }
   });
 });
